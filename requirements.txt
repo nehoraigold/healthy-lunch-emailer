@@ -1,3 +1,4 @@
 beautifulsoup4==4.14.3
 mailersend==2.0.0
+python-dotenv=1.2.1
 requests==2.32.5

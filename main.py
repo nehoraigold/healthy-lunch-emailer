@@ -7,21 +7,27 @@ from bs4 import BeautifulSoup
 from mailersend import MailerSendClient, EmailBuilder
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dotenv import load_dotenv
+load_dotenv()
 
 # ================= CONFIG =================
+NOTIFY_METHODS = os.environ.get("NOTIFY_METHODS", "email,slack").split(",")
 
-# Dietary constraints
+# ================= Dietary ================
 MAX_CALORIES = int(os.environ.get("MAX_CALORIES") or 850)
-MIN_GRAMS_PROTEIN = int(os.environ.get("MIN_GRAMS_PROTEIN") or 30)
+MIN_GRAMS_PROTEIN = int(os.environ.get("MIN_GRAMS_PROTEIN") or 25)
 
-# Email
-MAILERSEND_API_KEY = os.environ.get("MAILSERSEND_API_KEY")
+# ================= Email ==================
+MAILERSEND_API_KEY = os.environ.get("MAILERSEND_API_KEY")
 FROM_EMAIL = os.environ.get("FROM_EMAIL")
 
 # Recipients
 # An array of objects, each with "name" (string) and "email" (string)
 # Example: [{"name":"John Doe","email":"johndoe@example.com"}]
-RECIPIENTS = json.loads(os.environ.get("RECIPIENTS"))
+EMAIL_RECIPIENTS = json.loads(os.environ.get("EMAIL_RECIPIENTS"))
+
+# ================= Slack ==================
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
 # ================= CONSTS =================
 
@@ -133,16 +139,16 @@ def get_volume_score(item):
     return (item["serving_size"] * 100 / item['calories'])
 
 
-def build_subject_line():
+def build_title():
     today = datetime.now().strftime("%A, %B %d")
-    return f"Top Healthy Lunch Picks — {today}"
+    return f"🥗 Top Healthy Lunch Picks — {today} 🥗"
 
 
-def build_email(items):
+def build_message(items):
     if not items:
         return "No lunch options met your criteria today."
 
-    lines = [f"Here are today's top {TOP_N} healthy lunch picks:", ""]
+    lines = [f"Here are today's top {len(items)} healthy lunch picks:", ""]
     for i, item in enumerate(items, 1):
         lines.extend(
             [
@@ -158,19 +164,50 @@ def build_email(items):
     return "\n".join(lines)
 
 
-def send_email(body):
+def notify(title, message):
+    notify_functions = {
+        "email": send_email,
+        "slack": send_slack_message
+    }
+
+    for notify_method in NOTIFY_METHODS:
+        notify_func = notify_functions[notify_method]
+        if notify_func:
+            notify_func(title, message)
+
+
+def send_email(title, message):
+    if not MAILERSEND_API_KEY or not EMAIL_RECIPIENTS or not FROM_EMAIL:
+        print("Unable to send email, at least one of MAILERSEND_API_KEY, EMAIL_RECIPIENTS, FROM_EMAIL missing")
+        return
+
     ms = MailerSendClient(api_key=MAILERSEND_API_KEY)
     builder = (EmailBuilder()
-               .from_email(FROM_EMAIL, "Healthy PANW Lunch")
-               .to_many(RECIPIENTS)
-               .subject(build_subject_line())
-               .text(body))
-
-    # for recipient in RECIPIENTS:
-    #     builder.bcc(**recipient)
+               .from_email(FROM_EMAIL, "Healthy Lunch")
+               .to_many(EMAIL_RECIPIENTS)
+               .subject(title)
+               .text(message))
 
     email = builder.build()
     ms.emails.send(email)
+    print("Email sent!")
+
+
+def send_slack_message(title, message):
+    if not SLACK_WEBHOOK_URL:
+        print("Unable to trigger slack webhook, SLACK_WEBHOOK_URL missing")
+        return
+
+    r = requests.post(
+        SLACK_WEBHOOK_URL,
+        json={
+            "title": title,
+            "text": message
+        },
+        timeout=10,
+    )
+    r.raise_for_status()
+    print("Slack webhook triggered!")
 
 
 def get_healthy_meals(lunch_items):
@@ -202,12 +239,15 @@ def get_healthy_meals(lunch_items):
 
 def main():
     print("Starting job...")
+
     html = fetch_menu_page()
     lunch_items = extract_lunch_items(html)
-    meals = get_healthy_meals(lunch_items)
-    ranked = sorted(meals, key=score, reverse=True)[:TOP_N]
-    email_body = build_email(ranked)
-    send_email(email_body)
+    meals = sorted(get_healthy_meals(lunch_items), key=score, reverse=True)[:TOP_N]
+
+    print(f"Found {len(meals)} healthy meals")
+
+    notify(build_title(), build_message(meals))
+
     print("Job complete!")
 
 
